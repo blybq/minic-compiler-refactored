@@ -1,0 +1,24 @@
+{
+  "name": "minic-compiler-core",
+  "version": "1.0.0",
+  "description": "MiniC language compiler for Minisys system",
+  "main": "build/main.js",
+  "scripts": {
+    "compile": "tsc",
+    "compile:watch": "tsc --watch",
+    "test": "jest",
+    "test:watch": "jest --watch"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/jest": "^25.2.1",
+    "@types/node": "^13.13.4",
+    "jest": "^25.5.1",
+    "ts-jest": "^25.4.0",
+    "typescript": "^3.8.3"
+  },
+  "dependencies": {
+    "minimist": "^1.2.5"
+  }
+}
+

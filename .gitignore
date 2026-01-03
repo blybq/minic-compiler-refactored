@@ -1,0 +1,7 @@
+.cursor/
+docs/
+debug*
+*.ps1
+test*
+node_modules/
+build/
