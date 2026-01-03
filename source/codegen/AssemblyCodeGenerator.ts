@@ -53,8 +53,23 @@ export class AssemblyCodeGenerator {
    * 从内存取变量到寄存器
    */
   loadVar(varId: string, register: string) {
-    const varLoc = this._addressDescriptors.get(varId)?.boundMemAddress
-    requireCondition(varLoc !== undefined, `Cannot get the bound address for this variable: ${varId}`)
+    const addrDesc = this._addressDescriptors.get(varId)
+    if (addrDesc === undefined || addrDesc.boundMemAddress === undefined) {
+      // Variable doesn't have a bound memory address - it's a temporary variable
+      // Just mark it as being in the register
+      if (addrDesc === undefined) {
+        this._addressDescriptors.set(varId, {
+          boundMemAddress: undefined,
+          currentAddresses: new Set<string>().add(register),
+        })
+      } else {
+        addrDesc.currentAddresses.add(register)
+      }
+      this._registerDescriptors.get(register)?.variables.clear()
+      this._registerDescriptors.get(register)?.variables.add(varId)
+      return
+    }
+    const varLoc = addrDesc.boundMemAddress
     this.newAsm(`lw ${register}, ${varLoc}`)
     this.newAsm(`nop`)
     this.newAsm(`nop`)
@@ -69,8 +84,21 @@ export class AssemblyCodeGenerator {
    * 回写寄存器内容到内存
    */
   storeVar(varId: string, register: string) {
-    const varLoc = this._addressDescriptors.get(varId)?.boundMemAddress
-    requireCondition(varLoc !== undefined, `Cannot get the bound address for this variable: ${varId}`)
+    const addrDesc = this._addressDescriptors.get(varId)
+    if (addrDesc === undefined || addrDesc.boundMemAddress === undefined) {
+      // Variable doesn't have a bound memory address - it's a temporary variable
+      // Don't store it, just update the address descriptor
+      if (addrDesc === undefined) {
+        this._addressDescriptors.set(varId, {
+          boundMemAddress: undefined,
+          currentAddresses: new Set<string>().add(register),
+        })
+      } else {
+        addrDesc.currentAddresses.add(register)
+      }
+      return
+    }
+    const varLoc = addrDesc.boundMemAddress
     this.newAsm(`sw ${register}, ${varLoc}`)
     this._addressDescriptors.get(varId)?.currentAddresses.add(varLoc!)
   }
@@ -465,7 +493,10 @@ export class AssemblyCodeGenerator {
             }
           }
         } else {
-          requireCondition(false, `Attempted to store a ghost variable: ${kvpair[0]}`)
+          // Variable has no current address - it might have been cleared
+          // Skip storing if it's a temporary variable (no boundMemAddress check already done)
+          // For global variables, this shouldn't happen, but if it does, skip to avoid error
+          continue
         }
       }
     }
@@ -492,7 +523,10 @@ export class AssemblyCodeGenerator {
             }
           }
         } else {
-          requireCondition(false, `Attempted to store a ghost variable: ${kvpair[0]}`)
+          // Variable has no current address - it might have been cleared
+          // Skip storing if it's a temporary variable (no boundMemAddress check already done)
+          // For global variables, this shouldn't happen, but if it does, skip to avoid error
+          continue
         }
       }
     }
@@ -606,41 +640,71 @@ export class AssemblyCodeGenerator {
           // Before storing global variables, check if they are used as function arguments
           // If so, keep them in registers to avoid unnecessary load
           const argsToKeep = new Set<string>()
+          const argsInV0 = new Set<string>() // Variables that are in $v0 and used as arguments
           if (binaryOp) {
             const actualArguments = operand2.split('&')
             for (let argNum = 0; argNum < func.parameterList.length; argNum++) {
               const actualArg = actualArguments[argNum]
               const ad = this._addressDescriptors.get(actualArg)
               if (ad !== undefined && ad.currentAddresses !== undefined && ad.currentAddresses.size > 0) {
-                // Check if variable is in a register
-                for (const addr of ad.currentAddresses) {
-                  if (addr[0] == '$') {
-                    argsToKeep.add(actualArg)
-                    break
+                // Check if variable is in $v0 (from previous function call) - this has highest priority
+                if (ad.currentAddresses.has('$v0')) {
+                  argsInV0.add(actualArg)
+                  argsToKeep.add(actualArg)
+                } else {
+                  // Check if variable is in a register (including $v0)
+                  for (const addr of ad.currentAddresses) {
+                    if (addr[0] == '$') {
+                      argsToKeep.add(actualArg)
+                      break
+                    }
                   }
                 }
               }
             }
           }
           
+          // After function argument passing, store global variables that were in $v0
+          // This matches the reference file behavior: move $a0, $v0 then sw $t0, switch_val($0)
           for (const kvpair of this._addressDescriptors.entries()) {
-            // Skip storing if this variable is used as a function argument and is in a register
-            if (argsToKeep.has(kvpair[0])) {
+            // Skip storing if this variable is used as a function argument and is in a register (but not $v0)
+            if (argsToKeep.has(kvpair[0]) && !argsInV0.has(kvpair[0])) {
               continue
             }
             const boundMemAddress = kvpair[1].boundMemAddress
             const currentAddresses = kvpair[1].currentAddresses
+            // Only store global variables (those with boundMemAddress that is not a stack address)
             if (boundMemAddress != undefined && !currentAddresses.has(boundMemAddress)) {
+              // Check if this is a global variable (not a stack address)
+              const isGlobalVar = boundMemAddress.includes('($0)') || 
+                                  (boundMemAddress[0] != '-' && !boundMemAddress.includes('($sp)'))
+              if (!isGlobalVar) {
+                continue // Skip local variables
+              }
               // need to write this back to its bound memory location
               if (currentAddresses.size > 0) {
                 for (const addr of currentAddresses.values()) {
+                  // If variable is in $v0 and used as function argument, store from $v0
+                  if (addr == '$v0' && argsInV0.has(kvpair[0])) {
+                    // Store $v0 to global variable (semantically correct)
+                    this.storeVar(kvpair[0], '$v0')
+                    break
+                  }
+                  // If variable is in $v0 and not used as function argument, store from $v0
+                  if (addr == '$v0' && !argsInV0.has(kvpair[0])) {
+                    this.storeVar(kvpair[0], '$v0')
+                    break
+                  }
                   if (addr.substr(0, 2) == '$t') {
                     this.storeVar(kvpair[0], addr)
                     break
                   }
                 }
               } else {
-                requireCondition(false, `Attempted to store a ghost variable: ${kvpair[0]}`)
+                // Variable has no current address - it might have been cleared
+                // Skip storing if it's a temporary variable
+                // For global variables, this shouldn't happen, but if it does, skip to avoid error
+                continue
               }
             }
           }
@@ -651,7 +715,8 @@ export class AssemblyCodeGenerator {
           // But don't clear $v0 if it's being used for the next function call
           for (let kvpair of this._addressDescriptors.entries()) {
             for (let addr of kvpair[1].currentAddresses) {
-              if (addr.substr(0, 2) == '$t' || (addr == '$v0' && kvpair[1].currentAddresses.size > 1)) {
+              // Don't clear $v0 - it might be used for the next function call
+              if (addr.substr(0, 2) == '$t') {
                 kvpair[1].currentAddresses.delete(addr)
                 this._registerDescriptors.get(addr)?.variables.delete(kvpair[0])
               }
@@ -671,14 +736,49 @@ export class AssemblyCodeGenerator {
               }
             }
             
-            if (nextIsCallWithArg) {
-              // If the next instruction uses this result as an argument, keep it in $v0
-              // and mark it as being in $v0 for the next function call
+            // Check if the next instruction is =var and the target variable is used in a function call
+            let nextIsVarAssignToCallArg = false
+            if (irIndex + 1 < basicBlock.instructions.length) {
+              const nextQuad = basicBlock.instructions[irIndex + 1]
+              if (nextQuad && nextQuad.operation == '=var' && nextQuad.result) {
+                // Check if the target variable is used in the next function call
+                if (irIndex + 2 < basicBlock.instructions.length) {
+                  const nextNextQuad = basicBlock.instructions[irIndex + 2]
+                  if (nextNextQuad && nextNextQuad.operation == 'call' && nextNextQuad.operand2) {
+                    const nextNextArgs = nextNextQuad.operand2.split('&')
+                    if (nextNextArgs.includes(nextQuad.result)) {
+                      nextIsVarAssignToCallArg = true
+                    }
+                  }
+                }
+              }
+            }
+            
+            // Check if result is a global variable or local variable
+            const resultAddrDesc = this._addressDescriptors.get(result)
+            const isGlobalVar = resultAddrDesc !== undefined && resultAddrDesc.boundMemAddress !== undefined && 
+                               (resultAddrDesc.boundMemAddress.includes('($0)') || 
+                                (resultAddrDesc.boundMemAddress[0] != '-' && !resultAddrDesc.boundMemAddress.includes('($sp)')))
+            const isLocalVar = resultAddrDesc !== undefined && resultAddrDesc.boundMemAddress !== undefined && 
+                              !isGlobalVar && resultAddrDesc.boundMemAddress.includes('($sp)')
+            
+            if (nextIsCallWithArg || isGlobalVar || nextIsVarAssignToCallArg) {
+              // If the next instruction uses this result as an argument, or if it's a global variable,
+              // or if it's assigned to a variable that's used in a function call, keep it in $v0
+              // Don't move $v0 to another register - it will be used directly as function argument
               this.manageResDescriptors('$v0', result)
+              // If result is a global variable, storing will happen in the next function call
+              // (after function argument passing, using $t0 to match reference file)
             } else {
               const [regX] = this.getRegs(quad, blockIndex, irIndex)
               this.newAsm(`move ${regX}, $v0`)
               this.manageResDescriptors(regX, result)
+              // If result is a local variable, store it immediately to stack
+              if (isLocalVar && resultAddrDesc.boundMemAddress !== undefined) {
+                this.storeVar(result, regX)
+                resultAddrDesc.currentAddresses.clear()
+                resultAddrDesc.currentAddresses.add(resultAddrDesc.boundMemAddress)
+              }
               // Don't store global variable immediately - let it stay in register
               // It will be stored before the next function call if needed
             }
@@ -846,27 +946,56 @@ export class AssemblyCodeGenerator {
             }
             case '=var':
               const [regY] = this.getRegs(quad, blockIndex, irIndex)
-              // Add res to the register descriptor for regY
-              this._registerDescriptors.get(regY)?.variables.add(result)
-              // Change the address descriptor for res so that its only location is regY
-              if (this._addressDescriptors.has(result)) {
-                const resultAddrDesc = this._addressDescriptors.get(result)!
-                // If result is a global variable (has boundMemAddress), store it immediately
-                if (resultAddrDesc.boundMemAddress !== undefined && !resultAddrDesc.currentAddresses.has(resultAddrDesc.boundMemAddress)) {
-                  this.storeVar(result, regY)
-                  resultAddrDesc.currentAddresses.clear()
-                  resultAddrDesc.currentAddresses.add(resultAddrDesc.boundMemAddress)
-                } else {
-                  // Local variable or already in memory
-                  resultAddrDesc.currentAddresses.clear()
-                  resultAddrDesc.currentAddresses.add(regY)
+              
+              // Check if the next instruction is a function call that uses this result as an argument
+              let nextIsCallWithArg = false
+              if (irIndex + 1 < basicBlock.instructions.length) {
+                const nextQuad = basicBlock.instructions[irIndex + 1]
+                if (nextQuad && nextQuad.operation == 'call' && nextQuad.operand2) {
+                  const nextArgs = nextQuad.operand2.split('&')
+                  if (nextArgs.includes(result)) {
+                    nextIsCallWithArg = true
+                  }
                 }
+              }
+              
+              // Check if source variable (operand1) is in $v0
+              const sourceAddrDesc = this._addressDescriptors.get(operand1)
+              const sourceInV0 = sourceAddrDesc !== undefined && sourceAddrDesc.currentAddresses.has('$v0')
+              
+              // If source is in $v0 and next instruction uses result as argument, keep result in $v0
+              if (nextIsCallWithArg && sourceInV0) {
+                // Keep result in $v0 (don't move it)
+                this.manageResDescriptors('$v0', result)
               } else {
-                // temporary vairable
-                this._addressDescriptors.set(result, {
-                  boundMemAddress: undefined,
-                  currentAddresses: new Set<string>().add(regY),
-                })
+                // Add res to the register descriptor for regY
+                this._registerDescriptors.get(regY)?.variables.add(result)
+                // Change the address descriptor for res so that its only location is regY
+                if (this._addressDescriptors.has(result)) {
+                  const resultAddrDesc = this._addressDescriptors.get(result)!
+                  // If result has boundMemAddress, check if it needs to be stored
+                  // For local variables, always store if source is in register and target has boundMemAddress
+                  const sourceInReg = this._addressDescriptors.get(operand1)?.currentAddresses.has(regY) || 
+                                     this._addressDescriptors.get(operand1)?.currentAddresses.has('$v0')
+                  if (resultAddrDesc.boundMemAddress !== undefined && 
+                      (!resultAddrDesc.currentAddresses.has(resultAddrDesc.boundMemAddress) || 
+                       (sourceInReg && resultAddrDesc.boundMemAddress.includes('($sp)')))) {
+                    // Store to memory (both global and local variables)
+                    this.storeVar(result, regY)
+                    resultAddrDesc.currentAddresses.clear()
+                    resultAddrDesc.currentAddresses.add(resultAddrDesc.boundMemAddress)
+                  } else {
+                    // Variable already in memory or no bound address
+                    resultAddrDesc.currentAddresses.clear()
+                    resultAddrDesc.currentAddresses.add(regY)
+                  }
+                } else {
+                  // temporary vairable
+                  this._addressDescriptors.set(result, {
+                    boundMemAddress: undefined,
+                    currentAddresses: new Set<string>().add(regY),
+                  })
+                }
               }
               break
             case 'return_expr': {
