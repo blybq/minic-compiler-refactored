@@ -5,3 +5,7 @@ debug*
 test*
 node_modules/
 build/
+*.asm
+regenerate_grammar.js
+MiniC-LALRParse-test.json
+MiniC-Lex-test.json

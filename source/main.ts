@@ -16,12 +16,14 @@ import { parseTokenSequence } from './syntax_analyzer/SyntaxAnalyzer'
 import { loadLALRAnalyzer } from './core/grammar/LALRAnalyzerLoader'
 import { IntermediateCodeGenerator } from './intermediate_code/IntermediateCodeGenerator'
 import { AssemblyCodeGenerator } from './codegen/AssemblyCodeGenerator'
+import { generateLexTable } from './generator/lex/LexGenerator'
+import { generateGrammarTable } from './generator/grammar/GrammarGenerator'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const args = require('minimist')(process.argv.slice(2))
 
 // 检查参数
-requireCondition(args._.length === 1, '[用法]: node main.js <path_to_c_code> [-o <output_path>] [-i] [-v]')
+requireCondition(args._.length === 1, '[用法]: node main.js <path_to_c_code> [-o <output_path>] [-i] [-v] [--regenerate]')
 
 // 整理参数
 const codePath = args._[0]
@@ -67,6 +69,16 @@ try {
   // 词法分析
   print('  加载词法分析DFA...')
   const lexDFAPath = path.join(__dirname, '../syntax/MiniC/MiniC-Lex.json')
+  const lexSourcePath = path.join(__dirname, '../syntax/MiniC/MiniC.l')
+  
+  // 如果JSON文件不存在或需要重新生成，从.l文件生成
+  if (!fs.existsSync(lexDFAPath) || args.regenerate) {
+    print('  词法分析DFA文件不存在或需要重新生成，正在从.l文件生成...')
+    requireCondition(fs.existsSync(lexSourcePath), `找不到词法定义文件: ${lexSourcePath}`)
+    generateLexTable(lexSourcePath, lexDFAPath)
+    print(`  词法分析DFA已生成: ${lexDFAPath}`)
+  }
+  
   requireCondition(fs.existsSync(lexDFAPath), `找不到词法分析DFA文件: ${lexDFAPath}`)
   const lexDFA = DeterministicAutomaton.deserialize(lexDFAPath)
   print(`  词法分析DFA已从 ${lexDFAPath} 加载`)
@@ -77,6 +89,16 @@ try {
   // 语法分析
   print('  加载语法分析表...')
   const lalrPath = path.join(__dirname, '../syntax/MiniC/MiniC-LALRParse.json')
+  const grammarSourcePath = path.join(__dirname, '../syntax/MiniC/MiniC.y')
+  
+  // 如果JSON文件不存在或需要重新生成，从.y文件生成
+  if (!fs.existsSync(lalrPath) || args.regenerate) {
+    print('  语法分析表文件不存在或需要重新生成，正在从.y文件生成...')
+    requireCondition(fs.existsSync(grammarSourcePath), `找不到语法定义文件: ${grammarSourcePath}`)
+    generateGrammarTable(grammarSourcePath, lalrPath)
+    print(`  语法分析表已生成: ${lalrPath}`)
+  }
+  
   requireCondition(fs.existsSync(lalrPath), `找不到语法分析表文件: ${lalrPath}`)
   const lalrAnalyzer = loadLALRAnalyzer(lalrPath)
   print(`  语法分析表已从 ${lalrPath} 加载`)
@@ -114,12 +136,80 @@ try {
   fs.writeFileSync(path.join(outputPath, outputName + '.asm'), asmCode)
   print('  目标代码输出成功。')
   
+  // 辅助函数：生成包含函数体的中断处理程序
+  function generateInterruptHandlerWithFunctionBody(
+    ir: IntermediateCodeGenerator,
+    interruptFunctions: any[],
+    asmGen: any,
+    allAsmLines: string[]
+  ): string {
+    const { extractFunctionAsm } = require('./codegen/InterruptHandlerGenerator')
+    const lines: string[] = []
+    lines.push('# minisys-interrupt-handler.asm')
+    lines.push('')
+    
+    // 为每个中断函数生成处理程序
+    for (const func of interruptFunctions.sort((a: any, b: any) => {
+      const aNum = parseInt(a.functionName.replace('interruptServer', ''))
+      const bNum = parseInt(b.functionName.replace('interruptServer', ''))
+      return aNum - bNum
+    })) {
+      lines.push(`${func.functionName}:`)
+      
+      // 保存寄存器
+      const registersToSave = ['$s0', '$s1', '$s2', '$s3', '$s4', '$s5', '$s6', '$s7', '$t0', '$t1', '$t2', '$t3', '$t4', '$t5', '$t6', '$t7', '$t8', '$t9']
+      for (const reg of registersToSave) {
+        lines.push(`\tpush ${reg}`)
+      }
+      
+      // 提取并插入函数体代码
+      const funcAsm = extractFunctionAsm(asmGen, func, allAsmLines)
+      if (funcAsm.length > 0) {
+        lines.push('\t# 编译自 C 的主体代码')
+        // 添加函数体指令
+        for (const asmLine of funcAsm) {
+          lines.push(asmLine)
+        }
+      }
+      
+      // 恢复寄存器（顺序相反）
+      for (let i = registersToSave.length - 1; i >= 0; i--) {
+        lines.push(`\tpop ${registersToSave[i]}`)
+      }
+      
+      // 返回中断
+      lines.push('\tiret')
+      lines.push('')
+    }
+    
+    return lines.join('\n')
+  }
+  
+  // 检查是否有中断函数
+  const interruptFunctions = ir.functionPool.filter(func => func.isInterruptFunction)
+  if (interruptFunctions.length > 0) {
+    print(`  检测到 ${interruptFunctions.length} 个中断函数，生成中断处理文件...`)
+    
+    const { generateInterruptEntry } = require('./codegen/InterruptHandlerGenerator')
+    
+    // 生成中断向量表
+    const interruptEntryAsm = generateInterruptEntry(interruptFunctions)
+    fs.writeFileSync(path.join(outputPath, 'minisys-interrupt-entry.asm'), interruptEntryAsm)
+    print('  中断向量表已生成: minisys-interrupt-entry.asm')
+    
+    // 生成中断处理程序
+    const allAsmLines = asmCode.split('\n')
+    const handlerAsm = generateInterruptHandlerWithFunctionBody(ir, interruptFunctions, asmGenerator, allAsmLines)
+    fs.writeFileSync(path.join(outputPath, 'minisys-interrupt-handler.asm'), handlerAsm)
+    print('  中断处理程序已生成: minisys-interrupt-handler.asm')
+  }
+  
   if (withIR) {
     // 注意：IntermediateCodeGenerator需要实现toIRString方法
     // 这里暂时跳过IR输出，如果需要可以后续添加
     print('  IR输出功能暂未实现。')
   }
-  
+
   print('  输出完成。')
 
   const endTime = new Date().getTime()

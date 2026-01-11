@@ -15,10 +15,11 @@ export class IntermediateFunction {
   private _entryLabel: string // 入口标签
   private _exitLabel: string // 出口标签
   private _hasReturnStatement: boolean // 内部是否有return语句
-  private _parameterList: IntermediateVariable[] // 形参列表
+  private _parameterList: (IntermediateVariable | IntermediateArray)[] // 形参列表（支持数组参数）
   private _localVariables: (IntermediateVariable | IntermediateArray)[] // 所有局部变量
   private _childFunctions: string[] // 内部调用过的其他函数
   private _scopePath: number[] // 基础作用域路径
+  private _isInterruptFunction: boolean // 是否为中断函数（interruptServer0-4）
 
   get functionName(): string {
     return this._functionName
@@ -60,11 +61,11 @@ export class IntermediateFunction {
     this._hasReturnStatement = value
   }
 
-  get parameterList(): IntermediateVariable[] {
+  get parameterList(): (IntermediateVariable | IntermediateArray)[] {
     return this._parameterList
   }
 
-  set parameterList(value: IntermediateVariable[]) {
+  set parameterList(value: (IntermediateVariable | IntermediateArray)[]) {
     this._parameterList = value
   }
 
@@ -95,11 +96,12 @@ export class IntermediateFunction {
   constructor(
     functionName: string,
     returnType: DataType,
-    parameterList: IntermediateVariable[],
+    parameterList: (IntermediateVariable | IntermediateArray)[],
     entryLabel: string,
     exitLabel: string,
     scopePath: number[],
-    hasReturnStatement: boolean = false
+    hasReturnStatement: boolean = false,
+    isInterruptFunction: boolean = false
   ) {
     this._functionName = functionName
     this._returnType = returnType
@@ -110,6 +112,15 @@ export class IntermediateFunction {
     this._hasReturnStatement = hasReturnStatement
     this._localVariables = []
     this._childFunctions = []
+    this._isInterruptFunction = isInterruptFunction
+  }
+
+  get isInterruptFunction(): boolean {
+    return this._isInterruptFunction
+  }
+
+  set isInterruptFunction(value: boolean) {
+    this._isInterruptFunction = value
   }
 }
 

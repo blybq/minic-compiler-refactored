@@ -389,7 +389,17 @@ export class AssemblyCodeGenerator {
       for (const localVar of outer.localVariables) {
         if (localVar instanceof IntermediateVariable) {
           if (!outer.parameterList.includes(localVar)) localData++
-        } else localData += localVar.arrayLength
+        } else {
+          // 检查是否是数组参数（在parameterList中）
+          const isArrayParam = outer.parameterList.some(param => 
+            param instanceof IntermediateArray && param.arrayId === localVar.arrayId
+          )
+          if (!isArrayParam) {
+            // 局部数组声明不被支持
+            localData += localVar.arrayLength
+          }
+          // 数组参数不占用局部数据空间（它们通过参数传递）
+        }
       }
       let numGPRs2Save =
         outer.functionName == 'main' ? 0 : localData > 10 ? (localData > 18 ? 8 : localData - 8) : 0
@@ -415,11 +425,14 @@ export class AssemblyCodeGenerator {
     requireCondition(frameInfo !== undefined, 'Function name not in the pool')
     // must save args passed by register to memory, otherwise they can be damaged
     for (let index = 0; index < func.parameterList.length; index++) {
+      const param = func.parameterList[index]
       const memLoc = `${4 * (frameInfo.wordSize + index)}($sp)`
       if (index < 4) {
         this.newAsm(`sw $a${index}, ${memLoc}`)
       }
-      this._addressDescriptors.set(func.parameterList[index].variableId, {
+      // 数组参数使用arrayId，普通参数使用variableId
+      const paramId = param instanceof IntermediateArray ? param.arrayId : param.variableId
+      this._addressDescriptors.set(paramId, {
         currentAddresses: new Set<string>().add(memLoc),
         boundMemAddress: memLoc,
       })
@@ -439,7 +452,17 @@ export class AssemblyCodeGenerator {
           })
         }
       } else if (localVar instanceof IntermediateArray) {
-        requireCondition(false, 'Arrays are only supported as global variables!')
+        // 检查是否是数组参数（在parameterList中）
+        const isArrayParam = func.parameterList.some(param => 
+          param instanceof IntermediateArray && param.arrayId === localVar.arrayId
+        )
+        if (isArrayParam) {
+          // 数组参数已在参数处理阶段分配了地址，跳过
+          continue
+        } else {
+          // 局部数组声明不被支持
+          requireCondition(false, 'Arrays are only supported as global variables!')
+        }
       }
     }
 
@@ -786,19 +809,74 @@ export class AssemblyCodeGenerator {
         } else if (binaryOp) {
           switch (operation) {
             case '=[]': {
-              const [regY, regZ] = this.getRegs(quad, blockIndex, irIndex)
-              this.newAsm(`move $v1, ${regY}`)
-              this.newAsm(`sll $v1, $v1, 2`)
+              // operand1 = index, operand2 = value, result = arrayId
+              const [regY, regZ] = this.getRegs(quad, blockIndex, irIndex) // regY = index, regZ = value
+              this.newAsm(`move $v1, ${regY}`) // $v1 = index
+              this.newAsm(`sll $v1, $v1, 2`) // $v1 = index * 4
               const baseAddr = this._addressDescriptors.get(result)?.boundMemAddress
-              this.newAsm(`sw ${regZ}, ${baseAddr}($v1)`)
+              requireCondition(baseAddr !== undefined, `数组基地址未定义：${result}`)
+              // 如果baseAddr包含括号（如 "0($sp)" 或 "arr($0)"），需要特殊处理
+              if (baseAddr.includes('(')) {
+                // 基地址是相对于寄存器或内存的，需要使用add指令
+                // 提取基地址部分（去掉括号和偏移量）
+                const baseMatch = baseAddr.match(/^(.*?)\((.+)\)$/)
+                if (baseMatch) {
+                  const offset = baseMatch[1] || '0'
+                  const baseReg = baseMatch[2]
+                  // 加载基地址到临时寄存器
+                  this.newAsm(`lw $t9, ${baseAddr}`)
+                  this.newAsm(`nop`)
+                  this.newAsm(`nop`)
+                  // 计算最终地址
+                  this.newAsm(`add $v1, $t9, $v1`)
+                  // 存储到计算后的地址
+                  this.newAsm(`sw ${regZ}, 0($v1)`)
+                } else {
+                  requireCondition(false, `无法解析基地址格式：${baseAddr}`)
+                }
+              } else {
+                // 基地址是全局变量名，可以直接使用
+                this.newAsm(`lw $t9, ${baseAddr}`)
+                this.newAsm(`nop`)
+                this.newAsm(`nop`)
+                this.newAsm(`add $v1, $t9, $v1`)
+                this.newAsm(`sw ${regZ}, 0($v1)`)
+              }
               break
             }
             case '[]': {
-              const [regZ, regX] = this.getRegs(quad, blockIndex, irIndex)
-              this.newAsm(`move $v1, ${regZ}`)
-              this.newAsm(`sll $v1, $v1, 2`)
+              // operand1 = arrayId, operand2 = index, result = tempVar
+              const [regZ, regX] = this.getRegs(quad, blockIndex, irIndex) // regZ = index, regX = result
+              this.newAsm(`move $v1, ${regZ}`) // $v1 = index
+              this.newAsm(`sll $v1, $v1, 2`) // $v1 = index * 4
               const baseAddr = this._addressDescriptors.get(operand1)?.boundMemAddress
-              this.newAsm(`lw ${regX}, ${baseAddr}($v1)`)
+              requireCondition(baseAddr !== undefined, `数组基地址未定义：${operand1}`)
+              // 如果baseAddr包含括号（如 "0($sp)" 或 "arr($0)"），需要特殊处理
+              if (baseAddr.includes('(')) {
+                // 基地址是相对于寄存器或内存的，需要使用add指令
+                const baseMatch = baseAddr.match(/^(.*?)\((.+)\)$/)
+                if (baseMatch) {
+                  const offset = baseMatch[1] || '0'
+                  const baseReg = baseMatch[2]
+                  // 加载基地址到临时寄存器
+                  this.newAsm(`lw $t9, ${baseAddr}`)
+                  this.newAsm(`nop`)
+                  this.newAsm(`nop`)
+                  // 计算最终地址
+                  this.newAsm(`add $v1, $t9, $v1`)
+                  // 从计算后的地址加载
+                  this.newAsm(`lw ${regX}, 0($v1)`)
+                } else {
+                  requireCondition(false, `无法解析基地址格式：${baseAddr}`)
+                }
+              } else {
+                // 基地址是全局变量名，可以直接使用
+                this.newAsm(`lw $t9, ${baseAddr}`)
+                this.newAsm(`nop`)
+                this.newAsm(`nop`)
+                this.newAsm(`add $v1, $t9, $v1`)
+                this.newAsm(`lw ${regX}, 0($v1)`)
+              }
               this.newAsm(`nop`)
               this.newAsm(`nop`)
               this.manageResDescriptors(regX, result)

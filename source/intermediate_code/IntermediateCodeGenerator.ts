@@ -182,7 +182,7 @@ export class IntermediateCodeGenerator {
   /**
    * 结合当前所在的作用域寻找最近的名字相符的变量
    */
-  private findVariable(variableName: string): IntermediateVariable | IntermediateArray {
+  private findVariable(variableName: string): IntermediateVariable | IntermediateArray | null {
     const validScopes: number[][] = []
     const currentScope = [...this._scopePath]
     while (currentScope.length > 0) {
@@ -198,8 +198,7 @@ export class IntermediateCodeGenerator {
         }
       }
     }
-    requireCondition(false, `未找到该变量：${variableName}`)
-    return new IntermediateVariable('-1', '', 'none', [], false)
+    return null
   }
 
   /**
@@ -286,7 +285,13 @@ export class IntermediateCodeGenerator {
    */
   private processTypeSpecifier(node: SyntaxTreeNode): DataType {
     // 取类型字面值
-    return node.getChild(1).literalValue as DataType
+    requireCondition(node !== null && node !== undefined, 'processTypeSpecifier: type_spec节点为null或undefined')
+    requireCondition(node.nodeName === 'type_spec', `processTypeSpecifier: 节点不是type_spec，实际是：${node.nodeName}`)
+    requireCondition(node.childNodes.length > 0, `processTypeSpecifier: type_spec节点没有子节点，节点名：${node.nodeName}，子节点数：${node.childNodes.length}`)
+    const typeToken = node.getChild(1)
+    requireCondition(typeToken !== null && typeToken !== undefined, 'processTypeSpecifier: type_spec的子节点为null或undefined')
+    requireCondition(typeToken.nodeName === 'INT' || typeToken.nodeName === 'VOID' || typeToken.nodeName === 'STRING', `processTypeSpecifier: 类型token不是INT/VOID/STRING，实际是：${typeToken.nodeName}`)
+    return typeToken.literalValue as DataType
   }
 
   /**
@@ -297,13 +302,26 @@ export class IntermediateCodeGenerator {
     const retType = this.processTypeSpecifier(node.getChild(1))
     const funcName = node.getChild(2).literalValue
     requireCondition(!this._functionPool.some(v => v.functionName === funcName), `函数重复定义：${funcName}`)
+    
+    // 检查是否为中断函数（interruptServer0-4）
+    const isInterruptFunction = /^interruptServer[0-4]$/.test(funcName)
+    if (isInterruptFunction) {
+      requireCondition(retType === 'void', `中断函数 ${funcName} 必须返回 void`)
+      // 中断函数必须没有参数或参数列表为void
+      const paramsNode = node.getChild(3)
+      requireCondition(
+        paramsNode.getChild(1).nodeName === 'VOID',
+        `中断函数 ${funcName} 必须没有参数（参数列表必须为void）`
+      )
+    }
+    
     // 参数列表在processParameters时会填上
     const entryLabel = this.allocateLabel(funcName + '_entry')
     const exitLabel = this.allocateLabel(funcName + '_exit')
     // 进一层作用域
     this.enterScope()
     // 添加新函数
-    this._functionPool.push(new IntermediateFunction(funcName, retType, [], entryLabel, exitLabel, [...this._scopePath]))
+    this._functionPool.push(new IntermediateFunction(funcName, retType, [], entryLabel, exitLabel, [...this._scopePath], false, isInterruptFunction))
     this.createInstruction('set_label', '', '', entryLabel) // 函数入口
     // 解析函数参数
     this.processParameters(node.getChild(3), funcName)
@@ -314,6 +332,11 @@ export class IntermediateCodeGenerator {
     } else if (node.childNodes.length === 4) {
       // 没有局部变量
       this.processStatementList(node.getChild(4), { entryLabel, exitLabel, functionName: funcName })
+    }
+    // 对于void函数，如果没有显式的return语句，需要在函数结束前生成return_void
+    const func = this._functionPool.find(v => v.functionName === funcName)!
+    if (retType === 'void' && !func.hasReturnStatement) {
+      this.createInstruction('return_void', '', '', exitLabel)
     }
     this.createInstruction('set_label', '', '', exitLabel) // 函数出口
     // 退一层作用域
@@ -350,13 +373,45 @@ export class IntermediateCodeGenerator {
    * 处理单个参数
    */
   private processParameter(node: SyntaxTreeNode, funcName: string): void {
-    const type = this.processTypeSpecifier(node.getChild(1))
+    // 调试信息：打印节点结构
+    const childNames = node.childNodes.map((child, idx) => `${idx + 1}:${child.nodeName}`).join(', ')
+    
+    requireCondition(node.childNodes.length >= 2, `参数节点子节点数量不足：${node.childNodes.length}（${childNames}），函数：${funcName}`)
+    
+    // 获取type_spec节点（第1个子节点）
+    const typeSpecNode = node.getChild(1)
+    requireCondition(typeSpecNode && typeSpecNode.childNodes.length > 0, `type_spec节点无效，函数：${funcName}，type_spec子节点数：${typeSpecNode ? typeSpecNode.childNodes.length : 0}`)
+    
+    const type = this.processTypeSpecifier(typeSpecNode)
     requireCondition(type !== 'void', '不可以用void作参数类型。函数：' + funcName)
-    const name = node.getChild(2).literalValue
-    const variable = new IntermediateVariable(this.allocateVariableId(), name, type, this._scopePath, true)
-    this.addVariable(variable)
-    // 将形参送给函数
-    this._functionPool.find(v => v.functionName === funcName)!.parameterList.push(variable)
+    
+    // 获取IDENTIFIER节点（第2个子节点）
+    const identifierNode = node.getChild(2)
+    requireCondition(identifierNode && identifierNode.nodeName === 'IDENTIFIER', `参数名必须是IDENTIFIER，函数：${funcName}，实际节点：${identifierNode ? identifierNode.nodeName : 'null'}`)
+    requireCondition(identifierNode.literalValue !== undefined && identifierNode.literalValue !== null, `参数名不能为空，函数：${funcName}`)
+    const name = identifierNode.literalValue
+    
+    // 检查是否为数组参数（param节点有3个子节点：type_spec, IDENTIFIER, CONSTANT）
+    // 根据MiniC.y: param: type_spec IDENTIFIER LBRACKET CONSTANT RBRACKET { $$ = newNode('param', $1, $2, $4); }
+    if (node.childNodes.length === 3) {
+      // 数组参数：第3个子节点应该是CONSTANT（数组大小）
+      const arraySizeNode = node.getChild(3)
+      requireCondition(arraySizeNode && arraySizeNode.nodeName === 'CONSTANT', `数组参数大小必须是常量：${name}，实际节点：${arraySizeNode ? arraySizeNode.nodeName : 'null'}`)
+      const arraySize = parseInt(arraySizeNode.literalValue)
+      requireCondition(!isNaN(arraySize) && arraySize > 0, `数组参数大小必须为正整数：${name}`)
+      const array = new IntermediateArray(this.allocateVariableId(), type, name, arraySize, this._scopePath)
+      this.addVariable(array)
+      // 将数组参数添加到函数参数列表
+      this._functionPool.find(v => v.functionName === funcName)!.parameterList.push(array)
+    } else if (node.childNodes.length === 2) {
+      // 普通参数：type_spec IDENTIFIER（只有2个子节点）
+      const variable = new IntermediateVariable(this.allocateVariableId(), name, type, this._scopePath, true)
+      this.addVariable(variable)
+      // 将形参送给函数
+      this._functionPool.find(v => v.functionName === funcName)!.parameterList.push(variable)
+    } else {
+      requireCondition(false, `参数节点子节点数量异常：${node.childNodes.length}（${childNames}），函数：${funcName}`)
+    }
   }
 
   /**
@@ -453,12 +508,26 @@ export class IntermediateCodeGenerator {
    */
   private processIfStatement(node: SyntaxTreeNode, context?: FunctionExecutionContext): void {
     const expr = this.processExpression(node.getChild(1))
-    const trueLabel = this.allocateLabel('true') // 真入口标号
-    const falseLabel = this.allocateLabel('false') // 假入口标号
+    const trueLabel = this.allocateLabel('true') // if 分支入口标号
+    const falseLabel = this.allocateLabel('false') // else 分支入口标号（或 if 语句结束）
+    const endLabel = this.allocateLabel('end') // if-else 语句结束标号
+    
     this.createInstruction('set_label', '', '', trueLabel)
-    this.createInstruction('j_false', expr, '', falseLabel)
+    this.createInstruction('j_false', expr, '', falseLabel) // 条件为假时跳转到 else 或结束
+    
+    // 处理 if 分支
     this.processStatement(node.getChild(2), context)
-    this.createInstruction('set_label', '', '', falseLabel)
+    
+    // 如果有 else 分支（3个子节点：expr, if_stmt, else_stmt）
+    if (node.childNodes.length === 3) {
+      this.createInstruction('j', '', '', endLabel) // if 分支执行完后跳转到结束
+      this.createInstruction('set_label', '', '', falseLabel)
+      this.processStatement(node.getChild(3), context) // 处理 else 分支
+      this.createInstruction('set_label', '', '', endLabel)
+    } else {
+      // 没有 else 分支，falseLabel 就是结束标签
+      this.createInstruction('set_label', '', '', falseLabel)
+    }
   }
 
   /**
@@ -528,14 +597,22 @@ export class IntermediateCodeGenerator {
   private processExpressionStatement(node: SyntaxTreeNode): void {
     // 变量赋值：IDENTIFIER ASSIGN expr
     if (node.matchesSequence('IDENTIFIER ASSIGN expr')) {
-      const variable = this.findVariable(node.getChild(1).literalValue) as IntermediateVariable
+      const varName = node.getChild(1).literalValue
+      const varOrArray = this.findVariable(varName)
+      requireCondition(varOrArray !== null && varOrArray !== undefined, `变量未定义：${varName}`)
+      requireCondition(varOrArray instanceof IntermediateVariable, `不能对数组进行赋值，必须使用数组元素赋值`)
+      const variable = varOrArray as IntermediateVariable
       variable.isInitialized = true
       const rhs = this.processExpression(node.getChild(3))
       this.createInstruction('=var', rhs, '', variable.variableId)
     }
     // 数组赋值：IDENTIFIER expr ASSIGN expr
     if (node.matchesSequence('IDENTIFIER expr ASSIGN expr')) {
-      const arr = this.findVariable(node.getChild(1).literalValue) as IntermediateArray
+      const arrName = node.getChild(1).literalValue
+      const varOrArray = this.findVariable(arrName)
+      requireCondition(varOrArray !== null && varOrArray !== undefined, `数组未定义：${arrName}`)
+      requireCondition(varOrArray instanceof IntermediateArray, `不是数组：${arrName}`)
+      const arr = varOrArray as IntermediateArray
       const index = this.processExpression(node.getChild(2))
       const rhs = this.processExpression(node.getChild(4))
       this.createInstruction('=[]', index, rhs, arr.arrayId)
@@ -597,16 +674,28 @@ export class IntermediateCodeGenerator {
     }
     // 访问变量：IDENTIFIER
     if (node.matchesSequence('IDENTIFIER')) {
-      const variable = this.findVariable(node.getChild(1).literalValue) as IntermediateVariable
-      requireCondition(variable.isInitialized, `在初始化前使用了变量：${variable.variableName}`)
-      return variable.variableId
+      const varName = node.getChild(1).literalValue
+      const varOrArray = this.findVariable(varName)
+      requireCondition(varOrArray !== null && varOrArray !== undefined, `变量未定义：${varName}`)
+      if (varOrArray instanceof IntermediateArray) {
+        // 数组参数：直接返回数组ID（不需要访问元素）
+        return varOrArray.arrayId
+      } else {
+        // 普通变量
+        const variable = varOrArray as IntermediateVariable
+        requireCondition(variable !== null && variable !== undefined, `变量未定义：${varName}`)
+        requireCondition(variable.variableName !== undefined && variable.variableName !== null, `变量名未定义：${varName}，变量对象：${JSON.stringify({variableId: variable.variableId, variableName: variable.variableName, dataType: variable.dataType})}`)
+        requireCondition(variable.isInitialized, `在初始化前使用了变量：${variable.variableName}`)
+        return variable.variableId
+      }
     }
     // 访问数组元素：IDENTIFIER expr
     if (node.matchesSequence('IDENTIFIER expr')) {
       const index = this.processExpression(node.getChild(2))
       const name = node.getChild(1).literalValue
-      const variable = this.findVariable(name)
-      const arrayId = variable instanceof IntermediateArray ? variable.arrayId : variable.variableId
+      const varOrArray = this.findVariable(name)
+      requireCondition(varOrArray !== null && varOrArray !== undefined, `变量未定义：${name}`)
+      const arrayId = varOrArray instanceof IntermediateArray ? varOrArray.arrayId : (varOrArray as IntermediateVariable).variableId
       const result = this.allocateVariableId()
       this.createInstruction('[]', arrayId, index, result)
       return result
@@ -719,11 +808,14 @@ export class IntermediateCodeGenerator {
       '程序没有 main 函数'
     )
     for (const func of this._functionPool) {
-      // 有可能通过内联汇编自行处理了return
-      requireCondition(
-        func.hasReturnStatement || func.childFunctions.includes('__asm'),
-        `函数 ${func.functionName} 没有 return 语句`
-      )
+      // void函数可以不包含return语句
+      // 非void函数必须有return语句（除非通过内联汇编自行处理了return）
+      if (func.returnType !== 'void') {
+        requireCondition(
+          func.hasReturnStatement || func.childFunctions.includes('__asm'),
+          `函数 ${func.functionName} 没有 return 语句`
+        )
+      }
     }
   }
 
