@@ -27,11 +27,13 @@ interface ParsingTableCell {
  * 使用LALR分析表对Token序列进行语法分析，返回语法树根节点
  * @param tokens Token序列
  * @param analyzer LALR分析器
+ * @param errorCollector 错误收集器（可选）
  * @returns 语法树根节点，如果分析失败返回null
  */
 export function parseTokenSequence(
   tokens: Token[],
-  analyzer: ILALRAnalyzer
+  analyzer: ILALRAnalyzer,
+  errorCollector?: any
 ): SyntaxTreeNode | null {
   // 预处理Token序列
   // 检查未匹配符号
@@ -241,12 +243,22 @@ export function parseTokenSequence(
         // 接受
         return -1
 
-      default:
-        requireCondition(
-          false,
-          `语法分析表中存在未定义行为：在状态${currentState}下收到${analyzer.symbols[symbolIndex].content}时进行${cell.action}，推测行号为${lineNumber}`
-        )
-        return -1
+      default: {
+        const symbolContent = analyzer.symbols[symbolIndex]?.content || 'unknown'
+        const errorMsg = `语法分析表中存在未定义行为：在状态${currentState}下收到${symbolContent}时进行${cell.action}`
+        if (errorCollector) {
+          // 获取当前Token的行号信息
+          const currentToken = tokens[currentTokenIndex - 1]
+          const tokenLineNumber = currentToken ? currentToken.lineNumber : lineNumber
+          const tokenPosition = currentToken ? currentToken.position : 0
+          errorCollector.addSyntaxError(errorMsg, tokenLineNumber, tokenPosition)
+          // 跳过当前符号，尝试继续分析
+          return -1
+        } else {
+          requireCondition(false, `${errorMsg}，推测行号为${lineNumber}`)
+          return -1
+        }
+      }
     }
   }
 
@@ -337,20 +349,33 @@ export function parseTokenSequence(
         } else {
           requireCondition(false, `语法分析失败：SP_END token 未映射且符号表中不存在`)
         }
-      } else {
-        // 其他未映射的 token，报告错误
-        requireCondition(false, `语法分析失败：遇到未映射的token：${nextTok.name}，字面量：${nextTok.literal}`)
-      }
+        } else {
+          // 其他未映射的 token，报告错误
+          const errorMsg = `语法分析失败：遇到未映射的token：${nextTok.name}，字面量：${nextTok.literal}`
+          if (errorCollector) {
+            errorCollector.addSyntaxError(errorMsg, nextTok.lineNumber, nextTok.position)
+            // 跳过该token，继续分析
+            token = undefined
+            continue
+          } else {
+            requireCondition(false, errorMsg)
+          }
+        }
     }
   }
 
   // 如果循环正常退出，说明没有遇到接受状态
   const lastToken = currentTokenIndex > 0 ? tokens[currentTokenIndex - 1] : null
   const lastTokenName = lastToken ? lastToken.name : 'none'
-  requireCondition(
-    false,
-    `语法分析失败：循环正常退出但未到达接受状态，当前状态=${stateStack[stateStack.length - 1]}，符号栈长度=${symbolStack.length}，已处理token数=${currentTokenIndex}，总token数=${tokens.length}，最后一个token=${lastTokenName}`
-  )
-  return null
+  const errorMsg = `语法分析失败：循环正常退出但未到达接受状态，当前状态=${stateStack[stateStack.length - 1]}，符号栈长度=${symbolStack.length}，已处理token数=${currentTokenIndex}，总token数=${tokens.length}，最后一个token=${lastTokenName}`
+  if (errorCollector) {
+    const tokenLineNumber = lastToken ? lastToken.lineNumber : lineNumber
+    const tokenPosition = lastToken ? lastToken.position : 0
+    errorCollector.addSyntaxError(errorMsg, tokenLineNumber, tokenPosition)
+    return null
+  } else {
+    requireCondition(false, errorMsg)
+    return null
+  }
 }
 

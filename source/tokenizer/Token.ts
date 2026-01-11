@@ -10,5 +10,9 @@ export interface Token {
   name: string
   /** Token的字面值 */
   literal: string
+  /** 行号（从1开始） */
+  lineNumber: number
+  /** 在行中的位置（从1开始） */
+  position: number
 }
 

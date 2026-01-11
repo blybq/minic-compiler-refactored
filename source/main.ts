@@ -18,6 +18,7 @@ import { IntermediateCodeGenerator } from './intermediate_code/IntermediateCodeG
 import { AssemblyCodeGenerator } from './codegen/AssemblyCodeGenerator'
 import { generateLexTable } from './generator/lex/LexGenerator'
 import { generateGrammarTable } from './generator/grammar/GrammarGenerator'
+import { ErrorCollector } from './core/ErrorCollector'
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const args = require('minimist')(process.argv.slice(2))
@@ -41,6 +42,7 @@ const print = (message: string) => {
 
 try {
   const startTime = new Date().getTime()
+  const errorCollector = new ErrorCollector()
 
   print('====================================')
   print('  ===== [minic-compiler-core] =====')
@@ -83,7 +85,7 @@ try {
   const lexDFA = DeterministicAutomaton.deserialize(lexDFAPath)
   print(`  词法分析DFA已从 ${lexDFAPath} 加载`)
   print('  开始词法分析...')
-  const tokens = tokenizeSourceCode(processedCode, lexDFA)
+  const tokens = tokenizeSourceCode(processedCode, lexDFA, errorCollector)
   print(`  词法分析完成。获得 ${tokens.length} 个Token。`)
 
   // 语法分析
@@ -103,21 +105,31 @@ try {
   const lalrAnalyzer = loadLALRAnalyzer(lalrPath)
   print(`  语法分析表已从 ${lalrPath} 加载`)
   print('  开始语法分析...')
-  print(`  Token序列: ${tokens.slice(0, 10).map(t => `${t.name}(${t.literal})`).join(', ')}...`)
-  const astRoot = parseTokenSequence(tokens, lalrAnalyzer)
-  if (astRoot === null || astRoot === undefined) {
-    print(`  语法分析返回null或undefined，tokens数量=${tokens.length}`)
-    print(`  前10个token: ${tokens.slice(0, 10).map(t => `${t.name}:${t.literal}`).join(', ')}`)
+  const astRoot = parseTokenSequence(tokens, lalrAnalyzer, errorCollector)
+  if (astRoot === null && !errorCollector.hasErrors()) {
+    // 如果ast为null但没有收集到错误，说明是其他原因导致的失败
     requireCondition(false, '语法分析失败，AST根节点为null或undefined')
   }
   print('  语法分析完成。')
 
   print('*** 开始后端处理... ***')
 
-  // 中间代码生成
+  // 中间代码生成（只有在没有语法错误时才进行）
+  if (astRoot === null) {
+    // 如果有语法错误，astRoot为null，错误已在语法分析阶段收集
+    errorCollector.reportErrors()
+    process.exit(1)
+  }
+  
   print('  生成中间代码...')
-  const ir = new IntermediateCodeGenerator(astRoot!)
+  const ir = new IntermediateCodeGenerator(astRoot, errorCollector)
   print('  中间代码生成完成。')
+
+  // 检查是否有错误
+  if (errorCollector.hasErrors()) {
+    errorCollector.reportErrors()
+    process.exit(1)
+  }
 
   // 汇编代码生成
   print('  生成目标代码（汇编代码）...')

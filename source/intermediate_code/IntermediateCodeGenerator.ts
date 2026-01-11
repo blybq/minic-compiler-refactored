@@ -10,6 +10,7 @@ import { IntermediateFunction } from './IntermediateFunction'
 import { DataType } from './DataTypes'
 import { BasicBlock } from './BasicBlock'
 import { requireCondition, CompilerError } from '../core/utils'
+import { ErrorCollector } from '../core/ErrorCollector'
 
 export const GLOBAL_SCOPE_PATH = [0] // 0号作用域是全局作用域
 export const LABEL_PREFIX = '_label_'
@@ -63,6 +64,7 @@ export class IntermediateCodeGenerator {
   private _postChecks: PostCheck[] // 后置检查
   private _callsInScope: FunctionCallContext[] // 各个作用域下进行的函数调用
   private _basicBlocks!: BasicBlock[] // 经过基本块划分的四元式
+  private _errorCollector?: ErrorCollector // 错误收集器（可选）
 
   get functionPool(): IntermediateFunction[] {
     return this._functionPool
@@ -80,7 +82,7 @@ export class IntermediateCodeGenerator {
     return this._basicBlocks
   }
 
-  constructor(root: SyntaxTreeNode) {
+  constructor(root: SyntaxTreeNode, errorCollector?: ErrorCollector) {
     this._scopePath = GLOBAL_SCOPE_PATH
     this._variablePool = []
     this._functionPool = []
@@ -91,6 +93,7 @@ export class IntermediateCodeGenerator {
     this._loopStack = []
     this._postChecks = []
     this._callsInScope = []
+    this._errorCollector = errorCollector
 
     // 开始遍历
     this.processProgram(root)
@@ -610,7 +613,14 @@ export class IntermediateCodeGenerator {
     if (node.matchesSequence('IDENTIFIER expr ASSIGN expr')) {
       const arrName = node.getChild(1).literalValue
       const varOrArray = this.findVariable(arrName)
-      requireCondition(varOrArray !== null && varOrArray !== undefined, `数组未定义：${arrName}`)
+      if (varOrArray === null || varOrArray === undefined) {
+        if (this._errorCollector) {
+          this._errorCollector.addSemanticError(`数组未定义：${arrName}`, 0, 0)
+        } else {
+          requireCondition(false, `数组未定义：${arrName}`)
+        }
+        return
+      }
       requireCondition(varOrArray instanceof IntermediateArray, `不是数组：${arrName}`)
       const arr = varOrArray as IntermediateArray
       const index = this.processExpression(node.getChild(2))
@@ -676,7 +686,15 @@ export class IntermediateCodeGenerator {
     if (node.matchesSequence('IDENTIFIER')) {
       const varName = node.getChild(1).literalValue
       const varOrArray = this.findVariable(varName)
-      requireCondition(varOrArray !== null && varOrArray !== undefined, `变量未定义：${varName}`)
+      if (varOrArray === null || varOrArray === undefined) {
+        if (this._errorCollector) {
+          this._errorCollector.addSemanticError(`变量未定义：${varName}`, 0, 0)
+        } else {
+          requireCondition(false, `变量未定义：${varName}`)
+        }
+        // 返回一个临时变量ID，避免后续错误
+        return this.allocateVariableId()
+      }
       if (varOrArray instanceof IntermediateArray) {
         // 数组参数：直接返回数组ID（不需要访问元素）
         return varOrArray.arrayId
