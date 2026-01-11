@@ -12,6 +12,7 @@ export class SyntaxTreeNode {
   private _nodeType: 'token' | 'nonterminal' // 节点类型：Token（终结符）节点 / 非终结符节点
   private _literalValue: string // 字面量，非终结符的字面量没有意义
   private _childNodes: SyntaxTreeNode[] // 子节点
+  private _lineNumber: number // 行号（从1开始，0表示未知）
 
   get nodeName(): string {
     return this._nodeName
@@ -45,11 +46,20 @@ export class SyntaxTreeNode {
     this._childNodes = Array.from(value)
   }
 
-  constructor(nodeName: string, nodeType: 'token' | 'nonterminal', literalValue: string) {
+  get lineNumber(): number {
+    return this._lineNumber
+  }
+
+  set lineNumber(value: number) {
+    this._lineNumber = value
+  }
+
+  constructor(nodeName: string, nodeType: 'token' | 'nonterminal', literalValue: string, lineNumber: number = 0) {
     this._nodeName = nodeName
     this._nodeType = nodeType
     this._literalValue = literalValue
     this._childNodes = []
+    this._lineNumber = lineNumber
   }
 
   /**

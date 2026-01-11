@@ -83,7 +83,7 @@ export class IntermediateCodeGenerator {
   }
 
   constructor(root: SyntaxTreeNode, errorCollector?: ErrorCollector) {
-    this._scopePath = GLOBAL_SCOPE_PATH
+    this._scopePath = [...GLOBAL_SCOPE_PATH]
     this._variablePool = []
     this._functionPool = []
     this._instructionList = []
@@ -192,6 +192,8 @@ export class IntermediateCodeGenerator {
       validScopes.push([...currentScope])
       currentScope.pop()
     }
+    // 最后检查全局作用域
+    validScopes.push(GLOBAL_SCOPE_PATH)
     // validScopes由近及远
     for (const scope of validScopes) {
       for (const variable of this._variablePool) {
@@ -259,7 +261,7 @@ export class IntermediateCodeGenerator {
       const type = this.processTypeSpecifier(node.getChild(1))
       const name = node.getChild(2).literalValue
       requireCondition(type !== 'void', `不可以声明void型变量：${name}`)
-      this._scopePath = GLOBAL_SCOPE_PATH
+      this._scopePath = [...GLOBAL_SCOPE_PATH]
       requireCondition(
         !this._variablePool.some(v => {
           const varName = v instanceof IntermediateVariable ? v.variableName : v.arrayName
@@ -274,7 +276,7 @@ export class IntermediateCodeGenerator {
       const type = this.processTypeSpecifier(node.getChild(1))
       const name = node.getChild(2).literalValue
       const len = Number(node.getChild(3).literalValue)
-      this._scopePath = GLOBAL_SCOPE_PATH
+      this._scopePath = [...GLOBAL_SCOPE_PATH]
       requireCondition(
         !isNaN(len) && len > 0 && Math.floor(len) === len,
         `数组长度必须为正整数字面量，但取到 ${node.getChild(3).literalValue}`
@@ -602,7 +604,15 @@ export class IntermediateCodeGenerator {
     if (node.matchesSequence('IDENTIFIER ASSIGN expr')) {
       const varName = node.getChild(1).literalValue
       const varOrArray = this.findVariable(varName)
-      requireCondition(varOrArray !== null && varOrArray !== undefined, `变量未定义：${varName}`)
+      const lineNumber = node.lineNumber > 0 ? node.lineNumber : 0
+      if (varOrArray === null || varOrArray === undefined) {
+        if (this._errorCollector) {
+          this._errorCollector.addSemanticError(`变量未定义：${varName}`, lineNumber, 0)
+        } else {
+          requireCondition(false, `变量未定义：${varName}`)
+        }
+        return
+      }
       requireCondition(varOrArray instanceof IntermediateVariable, `不能对数组进行赋值，必须使用数组元素赋值`)
       const variable = varOrArray as IntermediateVariable
       variable.isInitialized = true
@@ -686,9 +696,10 @@ export class IntermediateCodeGenerator {
     if (node.matchesSequence('IDENTIFIER')) {
       const varName = node.getChild(1).literalValue
       const varOrArray = this.findVariable(varName)
+      const lineNumber = node.lineNumber > 0 ? node.lineNumber : 0
       if (varOrArray === null || varOrArray === undefined) {
         if (this._errorCollector) {
-          this._errorCollector.addSemanticError(`变量未定义：${varName}`, 0, 0)
+          this._errorCollector.addSemanticError(`变量未定义：${varName}`, lineNumber, 0)
         } else {
           requireCondition(false, `变量未定义：${varName}`)
         }
@@ -703,7 +714,22 @@ export class IntermediateCodeGenerator {
         const variable = varOrArray as IntermediateVariable
         requireCondition(variable !== null && variable !== undefined, `变量未定义：${varName}`)
         requireCondition(variable.variableName !== undefined && variable.variableName !== null, `变量名未定义：${varName}，变量对象：${JSON.stringify({variableId: variable.variableId, variableName: variable.variableName, dataType: variable.dataType})}`)
-        requireCondition(variable.isInitialized, `在初始化前使用了变量：${variable.variableName}`)
+        
+        // 只对局部变量检查初始化，全局变量跳过检查（因为全局变量可能在主函数中先被赋值）
+        const isGlobalVariable = IntermediateCodeGenerator.areScopesEqual(variable.scopePath, GLOBAL_SCOPE_PATH)
+        if (!isGlobalVariable && !variable.isInitialized) {
+          // 局部变量未初始化，报告错误
+          const lineNumber = node.lineNumber > 0 ? node.lineNumber : 0
+          if (this._errorCollector) {
+            this._errorCollector.addSemanticError(
+              `在初始化前使用了变量：${variable.variableName}`,
+              lineNumber,
+              0
+            )
+          } else {
+            requireCondition(false, `在初始化前使用了变量：${variable.variableName}`)
+          }
+        }
         return variable.variableId
       }
     }

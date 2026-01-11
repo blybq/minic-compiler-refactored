@@ -25,9 +25,18 @@ export interface SymbolStackEntry {
 export function createNonterminalNode(nodeName: string, ...entries: SymbolStackEntry[]): SymbolStackEntry {
   const node = new SyntaxTreeNode(nodeName, 'nonterminal', nodeName)
   const childNodes = entries.map(entry => entry.syntaxNode)
+  // 从第一个非空子节点获取行号（通常第一个子节点包含行号信息）
+  let lineNumber = 0
   for (const childNode of childNodes) {
-    node.appendChild(childNode)
+    if (childNode !== null && childNode !== undefined) {
+      node.appendChild(childNode)
+      // 如果当前节点还没有行号，使用第一个子节点的行号
+      if (lineNumber === 0 && childNode.lineNumber > 0) {
+        lineNumber = childNode.lineNumber
+      }
+    }
   }
+  node.lineNumber = lineNumber
   return {
     elementType: 'nonterminal',
     symbolName: nodeName,

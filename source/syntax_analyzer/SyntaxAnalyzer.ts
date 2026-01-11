@@ -193,7 +193,7 @@ export function parseTokenSequence(
         symbolStack.push({
           elementType: 'token',
           symbolName: previousToken.name,
-          syntaxNode: new SyntaxTreeNode(previousToken.name, 'token', previousToken.literal),
+          syntaxNode: new SyntaxTreeNode(previousToken.name, 'token', previousToken.literal, previousToken.lineNumber),
         })
         // 继续执行，没有break（原代码的设计）
       case 'nonterminal':
