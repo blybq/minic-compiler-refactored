@@ -16,12 +16,12 @@ export function generateInterruptEntry(interruptFunctions: IntermediateFunction[
   lines.push('# minisys-interrupt-entry.asm')
   lines.push('')
   
-  // 按interruptServer0-4的顺序生成jmp指令
+  // 按interruptServer0-4的顺序生成j指令
   for (let i = 0; i < 5; i++) {
     const funcName = `interruptServer${i}`
     const func = interruptFunctions.find(f => f.functionName === funcName)
     if (func) {
-      lines.push(`jmp ${funcName}`)
+      lines.push(`j ${funcName}`)
     }
   }
   
@@ -30,12 +30,12 @@ export function generateInterruptEntry(interruptFunctions: IntermediateFunction[
 
 /**
  * 生成中断处理程序文件内容
- * @param ir 中间代码生成器
  * @param interruptFunctions 中断函数列表
+ * @param functionBodyAsm 函数体汇编代码映射（函数名 -> 汇编代码行数组）
  */
 export function generateInterruptHandler(
-  ir: IntermediateCodeGenerator,
-  interruptFunctions: IntermediateFunction[]
+  interruptFunctions: IntermediateFunction[],
+  functionBodyAsm: Map<string, string[]>
 ): string {
   const lines: string[] = []
   lines.push('# minisys-interrupt-handler.asm')
@@ -50,33 +50,88 @@ export function generateInterruptHandler(
   })) {
     lines.push(`${func.functionName}:`)
     
-    // 保存寄存器（push r1, r2, r3, ...）
-    // 使用$t0-$t9和$s0-$s7，但根据实际需要保存
-    // 这里先保存常用的寄存器
-    const registersToSave = ['$s0', '$s1', '$s2', '$s3', '$s4', '$s5', '$s6', '$s7', '$t0', '$t1', '$t2', '$t3', '$t4', '$t5', '$t6', '$t7', '$t8', '$t9']
+    // 获取函数体汇编代码
+    const funcBodyAsm = functionBodyAsm.get(func.functionName) || []
     
-    // 先保存所有寄存器到栈
+    // 分析函数体中使用的寄存器
+    const usedRegisters = new Set<string>()
+    for (const line of funcBodyAsm) {
+      // 匹配寄存器：$t0-$t9, $s0-$s7, $v0-$v1, $a0-$a3, $ra, $sp等
+      const regMatches = line.match(/\$[tsvra][0-9]|\$sp|\$ra/g)
+      if (regMatches) {
+        for (const reg of regMatches) {
+          // 排除$sp（栈指针不需要保护）
+          if (reg !== '$sp') {
+            usedRegisters.add(reg)
+          }
+        }
+      }
+    }
+    
+    // 根据MIPS调用约定，确定需要保护的寄存器
+    // 中断处理程序需要保护：$s0-$s7（被调用者保存寄存器）、$t0-$t9（临时寄存器）和$ra（返回地址）
+    const registersToSave: string[] = []
+    
+    // 添加$s0-$s7（如果函数体中使用了）
+    for (let i = 0; i <= 7; i++) {
+      const reg = `$s${i}`
+      if (usedRegisters.has(reg)) {
+        registersToSave.push(reg)
+      }
+    }
+    
+    // 添加$t0-$t9（如果函数体中使用了）
+    for (let i = 0; i <= 9; i++) {
+      const reg = `$t${i}`
+      if (usedRegisters.has(reg)) {
+        registersToSave.push(reg)
+      }
+    }
+    
+    // 添加$ra（如果函数体中使用了）
+    if (usedRegisters.has('$ra')) {
+      registersToSave.push('$ra')
+    }
+    
+    // 按标准顺序排序：$s0-$s7, $t0-$t9, $ra
+    registersToSave.sort((a, b) => {
+      const order: string[] = []
+      // $s0-$s7
+      for (let i = 0; i <= 7; i++) {
+        order.push(`$s${i}`)
+      }
+      // $t0-$t9
+      for (let i = 0; i <= 9; i++) {
+        order.push(`$t${i}`)
+      }
+      // $ra
+      order.push('$ra')
+      return order.indexOf(a) - order.indexOf(b)
+    })
+    
+    // 生成push指令（保护寄存器）
     for (const reg of registersToSave) {
       lines.push(`\tpush ${reg}`)
     }
     
-    // 生成函数体代码
-    // 需要从主汇编代码中提取该函数的代码
-    // 这里我们需要访问AssemblyCodeGenerator来获取函数的汇编代码
-    // 但为了避免循环依赖，我们传入一个函数来获取汇编代码
+    // 插入函数体代码
+    if (funcBodyAsm.length > 0) {
+      for (const line of funcBodyAsm) {
+        lines.push(line)
+      }
+    } else {
+      lines.push('\t# 编译自 C 的主体代码')
+      lines.push(`\t# 函数: ${func.functionName}`)
+    }
     
-    // 暂时使用占位符，后续需要从AssemblyCodeGenerator中提取
-    lines.push('\t# 编译自 C 的主体代码')
-    lines.push(`\t# 函数: ${func.functionName}`)
-    lines.push('\t# TODO: 插入函数主体汇编代码')
-    
-    // 恢复寄存器（pop r3, r2, r1, ...，顺序相反）
+    // 生成pop指令（恢复寄存器，顺序相反）
     for (let i = registersToSave.length - 1; i >= 0; i--) {
       lines.push(`\tpop ${registersToSave[i]}`)
     }
     
     // 返回中断
-    lines.push('\tiret')
+    lines.push('\teret')
+    lines.push('\tnop')
     lines.push('')
   }
   

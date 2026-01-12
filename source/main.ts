@@ -202,7 +202,7 @@ try {
   if (interruptFunctions.length > 0) {
     print(`  检测到 ${interruptFunctions.length} 个中断函数，生成中断处理文件...`)
     
-    const { generateInterruptEntry } = require('./codegen/InterruptHandlerGenerator')
+    const { generateInterruptEntry, generateInterruptHandler, extractFunctionAsm } = require('./codegen/InterruptHandlerGenerator')
     
     // 生成中断向量表
     const interruptEntryAsm = generateInterruptEntry(interruptFunctions)
@@ -211,7 +211,12 @@ try {
     
     // 生成中断处理程序
     const allAsmLines = asmCode.split('\n')
-    const handlerAsm = generateInterruptHandlerWithFunctionBody(ir, interruptFunctions, asmGenerator, allAsmLines)
+    const functionBodyAsm = new Map<string, string[]>()
+    for (const func of interruptFunctions) {
+      const funcAsm = extractFunctionAsm(asmGenerator, func, allAsmLines)
+      functionBodyAsm.set(func.functionName, funcAsm)
+    }
+    const handlerAsm = generateInterruptHandler(interruptFunctions, functionBodyAsm)
     fs.writeFileSync(path.join(outputPath, 'minisys-interrupt-handler.asm'), handlerAsm)
     print('  中断处理程序已生成: minisys-interrupt-handler.asm')
   }
