@@ -493,7 +493,7 @@ export class AssemblyCodeGenerator {
       } else {
         this._addressDescriptors.set(globalVar.arrayId, {
           currentAddresses: new Set<string>().add(globalVar.arrayName),
-          boundMemAddress: globalVar.arrayName,
+          boundMemAddress: `${globalVar.arrayName}($0)`,
         })
       }
     }
@@ -815,16 +815,23 @@ export class AssemblyCodeGenerator {
               this.newAsm(`sll $v1, $v1, 2`) // $v1 = index * 4
               const baseAddr = this._addressDescriptors.get(result)?.boundMemAddress
               requireCondition(baseAddr !== undefined, `数组基地址未定义：${result}`)
+              const baseAddrNonNull = baseAddr!
               // 如果baseAddr包含括号（如 "0($sp)" 或 "arr($0)"），需要特殊处理
-              if (baseAddr.includes('(')) {
+              if (baseAddrNonNull.includes('(')) {
                 // 基地址是相对于寄存器或内存的，需要使用add指令
                 // 提取基地址部分（去掉括号和偏移量）
-                const baseMatch = baseAddr.match(/^(.*?)\((.+)\)$/)
+                const baseMatch = baseAddrNonNull.match(/^(.*?)\((.+)\)$/)
                 if (baseMatch) {
                   const offset = baseMatch[1] || '0'
                   const baseReg = baseMatch[2]
-                  // 加载基地址到临时寄存器
-                  this.newAsm(`lw $t9, ${baseAddr}`)
+                  // 如果基址寄存器是 $0 或 $zero，说明是全局数组，使用 la 指令加载地址
+                  if (baseReg === '$0' || baseReg === '$zero' || baseReg === '0') {
+                    const labelName = offset || baseMatch[1] || baseAddrNonNull.split('(')[0]
+                    this.newAsm(`la $t9, ${labelName}`)
+                  } else {
+                    // 加载基地址到临时寄存器
+                    this.newAsm(`lw $t9, ${baseAddrNonNull}`)
+                  }
                   this.newAsm(`nop`)
                   this.newAsm(`nop`)
                   // 计算最终地址
@@ -832,11 +839,11 @@ export class AssemblyCodeGenerator {
                   // 存储到计算后的地址
                   this.newAsm(`sw ${regZ}, 0($v1)`)
                 } else {
-                  requireCondition(false, `无法解析基地址格式：${baseAddr}`)
+                  requireCondition(false, `无法解析基地址格式：${baseAddrNonNull}`)
                 }
               } else {
-                // 基地址是全局变量名，可以直接使用
-                this.newAsm(`lw $t9, ${baseAddr}`)
+                // 基地址是全局数组名，使用 la 指令加载地址
+                this.newAsm(`la $t9, ${baseAddrNonNull}`)
                 this.newAsm(`nop`)
                 this.newAsm(`nop`)
                 this.newAsm(`add $v1, $t9, $v1`)
@@ -851,15 +858,22 @@ export class AssemblyCodeGenerator {
               this.newAsm(`sll $v1, $v1, 2`) // $v1 = index * 4
               const baseAddr = this._addressDescriptors.get(operand1)?.boundMemAddress
               requireCondition(baseAddr !== undefined, `数组基地址未定义：${operand1}`)
+              const baseAddrNonNull = baseAddr!
               // 如果baseAddr包含括号（如 "0($sp)" 或 "arr($0)"），需要特殊处理
-              if (baseAddr.includes('(')) {
+              if (baseAddrNonNull.includes('(')) {
                 // 基地址是相对于寄存器或内存的，需要使用add指令
-                const baseMatch = baseAddr.match(/^(.*?)\((.+)\)$/)
+                const baseMatch = baseAddrNonNull.match(/^(.*?)\((.+)\)$/)
                 if (baseMatch) {
                   const offset = baseMatch[1] || '0'
                   const baseReg = baseMatch[2]
-                  // 加载基地址到临时寄存器
-                  this.newAsm(`lw $t9, ${baseAddr}`)
+                  // 如果基址寄存器是 $0 或 $zero，说明是全局数组，使用 la 指令加载地址
+                  if (baseReg === '$0' || baseReg === '$zero' || baseReg === '0') {
+                    const labelName = offset || baseMatch[1] || baseAddrNonNull.split('(')[0]
+                    this.newAsm(`la $t9, ${labelName}`)
+                  } else {
+                    // 加载基地址到临时寄存器
+                    this.newAsm(`lw $t9, ${baseAddrNonNull}`)
+                  }
                   this.newAsm(`nop`)
                   this.newAsm(`nop`)
                   // 计算最终地址
@@ -867,11 +881,11 @@ export class AssemblyCodeGenerator {
                   // 从计算后的地址加载
                   this.newAsm(`lw ${regX}, 0($v1)`)
                 } else {
-                  requireCondition(false, `无法解析基地址格式：${baseAddr}`)
+                  requireCondition(false, `无法解析基地址格式：${baseAddrNonNull}`)
                 }
               } else {
-                // 基地址是全局变量名，可以直接使用
-                this.newAsm(`lw $t9, ${baseAddr}`)
+                // 基地址是全局数组名，使用 la 指令加载地址
+                this.newAsm(`la $t9, ${baseAddrNonNull}`)
                 this.newAsm(`nop`)
                 this.newAsm(`nop`)
                 this.newAsm(`add $v1, $t9, $v1`)
@@ -1022,7 +1036,7 @@ export class AssemblyCodeGenerator {
               this.manageResDescriptors(regX, result)
               break
             }
-            case '=var':
+            case '=var': {
               const [regY] = this.getRegs(quad, blockIndex, irIndex)
               
               // Check if the next instruction is a function call that uses this result as an argument
@@ -1076,6 +1090,7 @@ export class AssemblyCodeGenerator {
                 }
               }
               break
+            }
             case 'return_expr': {
               const ad = this._addressDescriptors.get(operand1)
               if (ad == undefined || ad.currentAddresses == undefined || ad.currentAddresses.size == 0) {
