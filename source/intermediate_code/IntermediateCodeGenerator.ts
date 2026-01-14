@@ -949,7 +949,7 @@ export class IntermediateCodeGenerator {
     for (const func of this._functionPool) {
       result += '\tname: ' + func.functionName + '\n'
       result += '\tretType: ' + func.returnType + '\n'
-      result += '\tparamList: ' + func.parameterList.map(v => `${v.variableId}(${v.dataType})`).join('; ') + '\n'
+      result += '\tparamList: ' + func.parameterList.map(v => `${(v as any).variableId || (v as any).arrayId}(${v.dataType})`).join('; ') + '\n'
       result += '\n'
     }
     result += '\n'

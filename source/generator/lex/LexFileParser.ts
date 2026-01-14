@@ -109,13 +109,14 @@ export class LexFileParser {
       const spaceMatch = /\s+/.exec(trimmed)
       requireCondition(spaceMatch !== null, `无效的别名定义行：${line}`)
       
-      const alias = trimmed.substring(0, spaceMatch.index)
+      const spaceMatchNonNull = spaceMatch!
+      const alias = trimmed.substring(0, spaceMatchNonNull.index)
       requireCondition(
-        (spaceMatch.index as number) < trimmed.length - 1,
+        (spaceMatchNonNull.index as number) < trimmed.length - 1,
         `无效的别名定义行：${line}`
       )
       
-      const regex = trimmed.substring(spaceMatch.index as number).trimLeft()
+      const regex = trimmed.substring(spaceMatchNonNull.index as number).trimLeft()
       requireCondition(
         !(alias in this._aliases),
         `别名重复定义：${alias}`

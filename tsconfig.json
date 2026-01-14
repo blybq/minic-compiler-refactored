@@ -11,11 +11,15 @@
       "node_modules/@types"
     ],
     "esModuleInterop": true,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noEmitOnError": false
   },
   "exclude": [
     "node_modules/**/*",
     "**/*.test.ts"
+  ],
+  "include": [
+    "source/**/*"
   ]
 }
 

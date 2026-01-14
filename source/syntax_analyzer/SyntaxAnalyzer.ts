@@ -47,7 +47,7 @@ export function parseTokenSequence(
   // 移除注释（保留换行符用于行号统计）
   tokens = tokens.map(token => {
     if (token.name === COMMENT_TOKEN_NAME && token.literal.endsWith('\n')) {
-      return { name: WHITESPACE_TOKEN_NAME, literal: '\n' }
+      return { name: WHITESPACE_TOKEN_NAME, literal: '\n', lineNumber: token.lineNumber, position: token.position } as Token
     }
     return token
   })
@@ -336,11 +336,12 @@ export function parseTokenSequence(
         `语法分析失败：已处理完所有token但未到达接受状态，当前状态=${stateStack[stateStack.length - 1]}，符号栈长度=${symbolStack.length}，剩余token数=${tokens.length - currentTokenIndex}`
       )
     }
-    token = tokenIdMap.get(nextTok.name)
+    const nextTokNonNull = nextTok!
+    token = tokenIdMap.get(nextTokNonNull.name)
     if (token === undefined) {
       // token 不在映射表中
       // 检查是否是 SP_END（SP_END 应该被映射，但如果未映射，说明有问题）
-      if (nextTok.name === 'SP_END') {
+      if (nextTokNonNull.name === 'SP_END') {
         // SP_END 应该在映射表中，如果没有，说明构建映射表时有问题
         // 但是，如果确实没有，我们可以尝试直接使用符号索引
         const spEndIndex = analyzer.symbols.findIndex(s => s.content === 'SP_END')
@@ -351,9 +352,9 @@ export function parseTokenSequence(
         }
         } else {
           // 其他未映射的 token，报告错误
-          const errorMsg = `语法分析失败：遇到未映射的token：${nextTok.name}，字面量：${nextTok.literal}`
+          const errorMsg = `语法分析失败：遇到未映射的token：${nextTokNonNull.name}，字面量：${nextTokNonNull.literal}`
           if (errorCollector) {
-            errorCollector.addSyntaxError(errorMsg, nextTok.lineNumber, nextTok.position)
+            errorCollector.addSyntaxError(errorMsg, nextTokNonNull.lineNumber, nextTokNonNull.position)
             // 跳过该token，继续分析
             token = undefined
             continue

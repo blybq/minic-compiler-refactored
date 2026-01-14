@@ -734,12 +734,94 @@ export class AssemblyCodeGenerator {
 
           this.newAsm(`jal ${operand1}`) // jal will automatically save return address to $ra
           this.newAsm('nop')
+          
+          // Before clearing temp registers, check if we need to save $v0 for a binary operation
+          // This must happen before clearing temp registers to preserve the value
+          let savedRegForBinaryOp = ''
+          if (result.length > 0) {
+            // Check if there's a second function call followed by a PLUS operation that uses this result
+            let lookAheadIndex = irIndex + 1
+            while (lookAheadIndex < basicBlock.instructions.length) {
+              const lookAheadQuad = basicBlock.instructions[lookAheadIndex]
+              if (lookAheadQuad && lookAheadQuad.operation === 'call') {
+                // Check if the next instruction after the second call is PLUS with this result as operand1
+                if (lookAheadIndex + 1 < basicBlock.instructions.length) {
+                  const plusQuad = basicBlock.instructions[lookAheadIndex + 1]
+                  const binaryOps = ['PLUS', 'MINUS', 'MULTIPLY', 'SLASH', 'PERCENT', 'EQ_OP', 'NE_OP', 'LT_OP', 'GT_OP', 'GE_OP', 'LE_OP', 'AND_OP', 'OR_OP', 'BITAND_OP', 'BITOR_OP', 'BITXOR_OP', 'LEFT_OP', 'RIGHT_OP']
+                  if (plusQuad && binaryOps.includes(plusQuad.operation) && plusQuad.operand1 === result) {
+                    // Need to save $v0 to another register before clearing temp registers
+                    // Find a free register (prefer $s registers as they're more persistent)
+                    for (let kvPair of this._registerDescriptors.entries()) {
+                      if (kvPair[1].variables.size == 0 && kvPair[1].usable && kvPair[0].substr(0, 2) === '$s') {
+                        savedRegForBinaryOp = kvPair[0]
+                        break
+                      }
+                    }
+                    // If no $s register available, use any free register
+                    if (!savedRegForBinaryOp) {
+                      for (let kvPair of this._registerDescriptors.entries()) {
+                        if (kvPair[1].variables.size == 0 && kvPair[1].usable && kvPair[0] !== '$v0') {
+                          savedRegForBinaryOp = kvPair[0]
+                          break
+                        }
+                      }
+                    }
+                    if (savedRegForBinaryOp) {
+                      this.newAsm(`move ${savedRegForBinaryOp}, $v0`)
+                      // Mark this register as containing the result and update address descriptor
+                      this._registerDescriptors.get(savedRegForBinaryOp)?.variables.clear()
+                      this._registerDescriptors.get(savedRegForBinaryOp)?.variables.add(result)
+                      // Update address descriptor for the result
+                      if (!this._addressDescriptors.has(result)) {
+                        this._addressDescriptors.set(result, {
+                          boundMemAddress: undefined,
+                          currentAddresses: new Set<string>().add(savedRegForBinaryOp),
+                        })
+                      } else {
+                        const resultDesc = this._addressDescriptors.get(result)!
+                        resultDesc.currentAddresses.clear()
+                        resultDesc.currentAddresses.add(savedRegForBinaryOp)
+                      }
+                    }
+                    break
+                  }
+                }
+                break
+              }
+              lookAheadIndex++
+            }
+          }
+          
           // clear temporary registers because they might have been damaged
           // But don't clear $v0 if it's being used for the next function call
+          // And don't clear the register we just saved the result to
+          // Also, don't clear registers that contain variables saved for binary operations
+          const protectedRegs = new Set<string>()
+          if (savedRegForBinaryOp) {
+            protectedRegs.add(savedRegForBinaryOp)
+          }
+          // Also check if the next instruction after this call is a binary operation that uses a variable from a previous call
+          if (irIndex + 1 < basicBlock.instructions.length) {
+            const nextQuad = basicBlock.instructions[irIndex + 1]
+            const binaryOps = ['PLUS', 'MINUS', 'MULTIPLY', 'SLASH', 'PERCENT', 'EQ_OP', 'NE_OP', 'LT_OP', 'GT_OP', 'GE_OP', 'LE_OP', 'AND_OP', 'OR_OP', 'BITAND_OP', 'BITOR_OP', 'BITXOR_OP', 'LEFT_OP', 'RIGHT_OP']
+            if (nextQuad && binaryOps.includes(nextQuad.operation) && nextQuad.operand1) {
+              // Check if operand1 is in a register and protect that register
+              const operand1AddrDesc = this._addressDescriptors.get(nextQuad.operand1)?.currentAddresses
+              if (operand1AddrDesc) {
+                for (const addr of operand1AddrDesc) {
+                  if (addr.substr(0, 2) === '$t' || addr.substr(0, 2) === '$s') {
+                    protectedRegs.add(addr)
+                  }
+                }
+              }
+            }
+          }
           for (let kvpair of this._addressDescriptors.entries()) {
             for (let addr of kvpair[1].currentAddresses) {
               // Don't clear $v0 - it might be used for the next function call
-              if (addr.substr(0, 2) == '$t') {
+              // Don't clear the saved register for binary operation
+              // Don't clear protected registers
+              if (addr.substr(0, 2) == '$t' && addr !== savedRegForBinaryOp && !protectedRegs.has(addr)) {
                 kvpair[1].currentAddresses.delete(addr)
                 this._registerDescriptors.get(addr)?.variables.delete(kvpair[0])
               }
@@ -785,6 +867,7 @@ export class AssemblyCodeGenerator {
             const isLocalVar = resultAddrDesc !== undefined && resultAddrDesc.boundMemAddress !== undefined && 
                               !isGlobalVar && resultAddrDesc.boundMemAddress.includes('($sp)')
             
+            
             if (nextIsCallWithArg || isGlobalVar || nextIsVarAssignToCallArg) {
               // If the next instruction uses this result as an argument, or if it's a global variable,
               // or if it's assigned to a variable that's used in a function call, keep it in $v0
@@ -793,14 +876,24 @@ export class AssemblyCodeGenerator {
               // If result is a global variable, storing will happen in the next function call
               // (after function argument passing, using $t0 to match reference file)
             } else {
-              const [regX] = this.getRegs(quad, blockIndex, irIndex)
-              this.newAsm(`move ${regX}, $v0`)
-              this.manageResDescriptors(regX, result)
-              // If result is a local variable, store it immediately to stack
-              if (isLocalVar && resultAddrDesc.boundMemAddress !== undefined) {
-                this.storeVar(result, regX)
-                resultAddrDesc.currentAddresses.clear()
-                resultAddrDesc.currentAddresses.add(resultAddrDesc.boundMemAddress)
+              // If result was saved to another register before clearing temp registers, use that register
+              // Otherwise, move it to the allocated register
+              if (savedRegForBinaryOp) {
+                // Result was already saved to savedRegForBinaryOp before clearing temp registers
+                // Update the address descriptor to reflect this
+                this.manageResDescriptors(savedRegForBinaryOp, result)
+              } else {
+                // Normal case: move result to allocated register
+                const [regX] = this.getRegs(quad, blockIndex, irIndex)
+                this.newAsm(`move ${regX}, $v0`)
+                this.manageResDescriptors(regX, result)
+                
+                // If result is a local variable, store it immediately to stack
+                if (isLocalVar && resultAddrDesc.boundMemAddress !== undefined) {
+                  this.storeVar(result, regX)
+                  resultAddrDesc.currentAddresses.clear()
+                  resultAddrDesc.currentAddresses.add(resultAddrDesc.boundMemAddress)
+                }
               }
               // Don't store global variable immediately - let it stay in register
               // It will be stored before the next function call if needed
